@@ -3,7 +3,7 @@
  * @Date: 2024-04-16 13:16:56
  * @Description: 
  * @LastEditors: zhouyuchong
- * @LastEditTime: 2024-04-18 16:30:28
+ * @LastEditTime: 2024-04-18 16:32:54
 -->
 # val_aim
 
@@ -16,6 +16,10 @@ python3 script/trt_test.py --trt model/yolov9_val.engine --img data/images --con
 
 ## Output
 <img src="/output/v00_trt_out.jpg" width="600">
+
+## TODO
++ use obs to push stream and infer
++ find a way to control mouse(not win32 api)
 
 ## Reference
 
