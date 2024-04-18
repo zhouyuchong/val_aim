@@ -20,12 +20,8 @@ CONF_THRESH = 0.5
 IOU_THRESHOLD = 0.4
 
 
-class FastestDet_TRT(object):
-    """
-    description: A FastestDet class that warps TensorRT ops, preprocess and postprocess ops.
-    """
-
-    def __init__(self, engine_file_path, batch_size):
+class YOLO_TRT(object):
+    def __init__(self, engine_file_path, batch_size, conf, topk):
         # Create a Context on this device,
         self.ctx = cuda.Device(0).make_context()
         stream = cuda.Stream()
@@ -49,7 +45,7 @@ class FastestDet_TRT(object):
             print('bingding:', binding, engine.get_binding_shape(binding))
 
             # Multiply by since we use dynamic batch size in our trt plan file
-            size = trt.volume(engine.get_binding_shape(binding)) * self.batch_size * -1
+            size = trt.volume(engine.get_binding_shape(binding)) * self.batch_size * 1
 
             dtype = trt.nptype(engine.get_binding_dtype(binding))
             # Allocate host and device buffers
@@ -76,6 +72,8 @@ class FastestDet_TRT(object):
         self.host_outputs = host_outputs
         self.cuda_outputs = cuda_outputs
         self.bindings = bindings
+        self.topk = topk
+        self.conf = conf
 
     def infer(self, img_path):
         threading.Thread.__init__(self)
@@ -119,17 +117,19 @@ class FastestDet_TRT(object):
         output = host_outputs[0]
 
         boxes, scores = self.post_process(output, ori_img)
-        # result_boxes = boxes[:, :4] if len(boxes) else np.array([])
 
         for i in range(len(boxes)):
             box = boxes[i]
             box = box.tolist()
-
             obj_score = scores[i]
             x1, y1 = int(box[0]), int(box[1])
             x2, y2 = int(box[2]), int(box[3])
             cv2.rectangle(ori_img, (x1, y1), (x2, y2), (255, 255, 0), 2)
-            # print(box[4], box[5])
+
+            text_x = max(x1, x2 - 100)  # 假设文本距离矩形框右侧至少100像素
+            text_y = y1 - 20  # 假设文本距离矩形框顶部至少20像素
+            score_str = str(obj_score)
+            cv2.putText(ori_img, score_str, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
         return ori_img, end - start
 
@@ -183,7 +183,6 @@ class FastestDet_TRT(object):
 
         image = cv2.cvtColor(ori_img, cv2.COLOR_BGR2RGB)
         image = cv2.resize(image, (tw, th))
-        print("resize: ", ty1, ty2, tx1, tx2)
         image = cv2.copyMakeBorder(
             image, ty1, ty2, tx1, tx2, cv2.BORDER_CONSTANT, None, (128, 128, 128)
         )
@@ -239,15 +238,10 @@ class FastestDet_TRT(object):
         """
         origin_h = origin_img.shape[0]
         origin_w = origin_img.shape[1]
-        p = np.reshape(output[0:], (-1, 6))
-        device = torch.device("cpu")
-        output_bboxes = []
-        output, temp = [], []
-        b, s, c = [], [], []
-        # 阈值筛选
-        t = p[:, 4] > 0.5
+        p = np.reshape(output[0:], (5, -1))
+        p = p.transpose(1, 0)
         # Get the boxes that score > CONF_THRESH
-        boxes = p[p[:, 4] >= 0.5]
+        boxes = p[p[:, 4] >= self.conf]
         # Trandform bbox from [center_x, center_y, w, h] to [x1, y1, x2, y2]
         boxes[:, :4] = self.xywh2xyxy(origin_h, origin_w, boxes[:, :4])
         
@@ -262,15 +256,16 @@ class FastestDet_TRT(object):
 
         keep_boxes = []
         while boxes.shape[0]:
-            large_overlap = self.bbox_iou(np.expand_dims(boxes[0, :4], 0), boxes[:, :4]) > 0.4
+            large_overlap = self.bbox_iou(np.expand_dims(boxes[0, :4], 0), boxes[:, :4]) > 0.6
             label_match = boxes[0, -1] == boxes[:, -1]
             # Indices of boxes with lower confidence scores, large IOUs and matching labels
             invalid = large_overlap & label_match
             keep_boxes += [boxes[0]]
             boxes = boxes[~invalid]
         boxes = np.stack(keep_boxes, 0) if len(keep_boxes) else np.array([])
-        result_boxes = boxes[:, :4] if len(boxes) else np.array([])
-        result_scores = boxes[:, 4] if len(boxes) else np.array([])
+
+        result_boxes = boxes[:1, :4] if len(boxes) else np.array([])
+        result_scores = boxes[:1, 4] if len(boxes) else np.array([])
         return result_boxes, result_scores
 
     def bbox_iou(self, box1, box2, x1y1x2y2=True):
@@ -300,6 +295,7 @@ class FastestDet_TRT(object):
         inter_rect_x2 = np.minimum(b1_x2, b2_x2)
         inter_rect_y2 = np.minimum(b1_y2, b2_y2)
         # Intersection area
+
         inter_area = np.clip(inter_rect_x2 - inter_rect_x1 + 1, 0, None) * \
                      np.clip(inter_rect_y2 - inter_rect_y1 + 1, 0, None)
         # Union Area
@@ -313,37 +309,60 @@ class FastestDet_TRT(object):
 
 
 class inferThread(threading.Thread):
-    def __init__(self, trt_wrapper, image_path, output_path):
+    def __init__(self, trt_wrapper, image_path, output_path, warmup=False):
         threading.Thread.__init__(self)
         self.trt_wrapper = trt_wrapper
         self.image_path = image_path
         self.output_path = output_path
+        self.warmup = warmup
 
     def run(self):
         image_raw, use_time = self.trt_wrapper.infer(self.image_path)
-        cv2.imwrite(self.output_path, image_raw)
-        print("result save to {}, time usage: {}".format(self.output_path, use_time))
+        if not self.warmup:
+            cv2.imwrite(self.output_path, image_raw)
+            print("result save to {}, time usage: {}".format(self.output_path, use_time))
+
+
 
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--trt', type=str, default="", required=True, help='trt file path')
     parser.add_argument('--img', type=str, default="", required=True, help='input image path')
-    parser.add_argument('--conf_thresh', type=float, default=0.25, required=False, help='confidence threshold')
+    parser.add_argument('--topk', type=int, default=1, required=False, help='topk heads')
+    parser.add_argument('--conf', type=float, default=0.25, required=False, help='confidence threshold')
     args = parser.parse_args()
 
     engine_file_path = args.trt
     input_image_path = args.img
-    output_image_path = args.img.replace('.jpg', '_trt_out.jpg')
-    trt_wrapper = FastestDet_TRT(engine_file_path, batch_size=1)
-    try:
-        print('batch size is', trt_wrapper.batch_size)
+    if 'jpg' in input_image_path or 'png' in input_image_path:
+        input_image_path = args.img
+    else:
+        input_list = os.listdir(input_image_path)
+        batch_signal = 1
 
-        thread1 = inferThread(trt_wrapper, input_image_path, output_image_path)
-        thread1.start()
-        thread1.join()
+    trt_wrapper = YOLO_TRT(engine_file_path, batch_size=1, conf=args.conf, topk=args.topk)
+    is_first = True
+    
+    try:
+        for image in input_list:
+            if is_first:
+                is_first = False
+                for i in range(5):
+                    image_path = os.path.join(input_image_path, image)
+                    output_image_path = args.img.replace('.jpg', '_trt_out.jpg') if args.img.endswith('.jpg') else args.img.replace('.png', '_trt_out.png')
+                    thread1 = inferThread(trt_wrapper, image_path, output_image_path, warmup=True)
+                    thread1.start()
+                    thread1.join()
+
+            image_path = os.path.join(input_image_path, image)
+            output_image_path = image.replace('.jpg', '_trt_out.jpg') if image.endswith('.jpg') else image.replace('.png', '_trt_out.png')
+            output_image_path = os.path.join('output', output_image_path)
+            thread1 = inferThread(trt_wrapper, image_path, output_image_path)
+            thread1.start()
+            thread1.join()
+
     finally:
         # destroy the instance
         trt_wrapper.destroy()

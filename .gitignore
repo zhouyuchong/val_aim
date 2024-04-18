@@ -1,0 +1,10 @@
+*.txt
+
+*.yaml
+*.zip
+
+
+dataset/*
+model/*
+zip_datasets/*
+merge_dataset/*
