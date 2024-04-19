@@ -3,11 +3,14 @@
  * @Date: 2024-04-16 13:16:56
  * @Description: 
  * @LastEditors: zhouyuchong
- * @LastEditTime: 2024-04-18 16:32:54
+ * @LastEditTime: 2024-04-19 13:29:23
 -->
 # val_aim
 
 use YOLOV9 for valorant detection
+
+## model
+[trt model](https://drive.google.com/file/d/1VctrCi814dUsYeovYJZy5XzdmHlFpxYw/view?usp=sharing)
 
 ## Usage
 ```
